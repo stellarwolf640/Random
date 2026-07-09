@@ -98,7 +98,7 @@ try:
 except KeyboardInterrupt:
     print("You think you can stop this?")
     time.sleep(1.5)
-    total = 150
+    total = 1500
 
     for i in range(1, total + 1):
         action = random.choice([
@@ -118,7 +118,7 @@ except KeyboardInterrupt:
         if i % random.randint(18, 30) == 0:
             print(f"WARNING: {random.choice(status_messages)}")
 
-        time.sleep(random.uniform(0.005, 0.025))
+        time.sleep(random.uniform(0.0005, 0.0025))
 
     time.sleep(3)
     print("\nDeletion failed successfully.")
