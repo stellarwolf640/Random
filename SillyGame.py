@@ -1,5 +1,6 @@
 import random
 import time
+import os
 
 system_roots = [
     r"C:\Windows\System32",
@@ -54,6 +55,8 @@ def fake_path():
     return f"{root}\\{nested}\\{filename}"
 
 secret_number = random.randint(1, 10)
+
+os.system('cls')
 
 try:
     print("Silly Guessing Game!")
