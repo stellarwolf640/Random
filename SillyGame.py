@@ -88,6 +88,7 @@ try:
             print(f"{action}: {fake_path()}")
 
             time.sleep(random.uniform(0.0001, 0.002))
+            
 
         time.sleep(1.5)
         print("\nDeletion failed successfully.")
