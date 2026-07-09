@@ -80,20 +80,20 @@ try:
             print(message)
             time.sleep(0.4)
 
-        total = 1750
+        total = 6500
 
         for i in range(1, total + 1):
             action = "Deleting"
 
             print(f"{action}: {fake_path()}")
 
-            time.sleep(random.uniform(0.0005, 0.005))
+            time.sleep(random.uniform(0.0001, 0.002))
 
-        time.sleep(3)
+        time.sleep(1.5)
         print("\nDeletion failed successfully.")
 except KeyboardInterrupt:
     print("You think you can stop this?")
-    time.sleep(3)
+    time.sleep(1.5)
     total = 150
 
     for i in range(1, total + 1):
