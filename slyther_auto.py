@@ -4,8 +4,8 @@ import sys
 import time
 from collections import deque
 
-WIDTH = 30
-HEIGHT = 15
+WIDTH = 10
+HEIGHT = 5
 TICK_RATE = 0.11
 AUTO_PLAY = True
 SPEED_KEYS = {
