@@ -79,9 +79,9 @@ try:
         print("Initializing System32 deletion protocol...")
         time.sleep(0.8)
 
-        for message in status_messages[:4]:
+        for message in status_messages:
             print(message)
-            time.sleep(0.4)
+            time.sleep(random.uniform(0.8, 0.2))
 
         total = 6500
 
