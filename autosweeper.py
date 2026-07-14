@@ -12,11 +12,15 @@ It works in three tiers, escalating only when the previous tier is stuck:
                         B's, subtracting A from B can create new certainties
                         (this cracks classic 1-2-1 / 1-2-2-1 patterns).
 3. Enumeration        - enumerate every consistent mine layout for each
-                        connected frontier component; cells that are mines in
-                        every layout (or in none) are proven, not guessed.
-4. Probability guess  - only when nothing on the board is provably safe,
-                        reveal the cell with the lowest mine probability
-                        (comparing against off-frontier cells too).
+                        connected frontier component, then combine components
+                        and weight each layout by how many ways the leftover
+                        mines fit in the unexplored cells. Cells that are
+                        mines in every weighted possibility (or in none) are
+                        proven, not guessed.
+4. Probability guess  - only when nothing anywhere on the board is provably
+                        safe or provably a mine, reveal the cell with the
+                        lowest exact mine probability (unexplored cells
+                        compete with frontier cells on equal footing).
 
 Run with:
     python autosweeper.py                     # watch one Beginner game (console)
@@ -30,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import math
 import random
 import time
 import tkinter as tk
@@ -42,7 +47,7 @@ from minesweeper import DIFFICULTIES, CellState, Coord, Minefield, MinesweeperAp
 
 # Frontier components larger than this are not enumerated exhaustively;
 # the solver falls back to a per-constraint density heuristic instead.
-MAX_ENUMERATION_CELLS = 24
+MAX_ENUMERATION_CELLS = 30
 
 
 @dataclass(frozen=True)
@@ -193,16 +198,20 @@ class AutoSweeper:
 
     def _enumerate_component(
         self, cells: list[Coord], constraints: list[Constraint], mines_cap: int
-    ) -> dict[Coord, float] | None:
-        """Exact per-cell mine probability via backtracking enumeration.
+    ) -> tuple[dict[int, int], dict[Coord, dict[int, int]]] | None:
+        """Count every consistent mine layout, grouped by how many mines it uses.
 
-        Returns None when the component is too large to enumerate.
+        Returns (solutions_by_mines, cell_mine_counts) where
+        solutions_by_mines[k] is the number of valid layouts placing exactly k
+        mines in this component, and cell_mine_counts[cell][k] is how many of
+        those layouts make `cell` a mine. Returns None when the component is
+        too large to enumerate (or, defensively, has no valid layout).
         """
         if len(cells) > MAX_ENUMERATION_CELLS:
             return None
 
-        cell_index = {cell: i for i, cell in enumerate(cells)}
-        # For pruning, order cells so that constraint members are adjacent.
+        # Order cells so that members of the same constraint are adjacent:
+        # constraints then become fully decided early, so pruning fires early.
         ordered: list[Coord] = []
         for constraint in constraints:
             for cell in sorted(constraint.cells):
@@ -212,103 +221,200 @@ class AutoSweeper:
             if cell not in ordered:
                 ordered.append(cell)
 
-        constraint_data = [
-            ([cell_index[c] for c in constraint.cells], constraint.mines)
-            for constraint in constraints
-        ]
+        index_of = {cell: i for i, cell in enumerate(ordered)}
+        required = [constraint.mines for constraint in constraints]
+        assigned = [0] * len(constraints)
+        undecided = [len(constraint.cells) for constraint in constraints]
+        touching: list[list[int]] = [[] for _ in ordered]
+        for constraint_index, constraint in enumerate(constraints):
+            for cell in constraint.cells:
+                touching[index_of[cell]].append(constraint_index)
 
-        assignment = [False] * len(cells)
-        mine_solution_counts = [0] * len(cells)
-        solution_count = 0
-
-        def satisfiable(position: int) -> bool:
-            """Check no constraint is already violated given cells[:position] decided."""
-            decided = {cell_index[ordered[i]] for i in range(position)}
-            for members, required in constraint_data:
-                assigned = sum(assignment[m] for m in members if m in decided)
-                undecided = sum(1 for m in members if m not in decided)
-                if assigned > required or assigned + undecided < required:
-                    return False
-            return True
-
-        def backtrack(position: int, mines_used: int) -> None:
-            nonlocal solution_count
-            if mines_used > mines_cap:
-                return
-            if position == len(ordered):
-                solution_count += 1
-                for i, is_mine in enumerate(assignment):
-                    if is_mine:
-                        mine_solution_counts[i] += 1
-                return
-            index = cell_index[ordered[position]]
-            for value in (False, True):
-                assignment[index] = value
-                if satisfiable(position + 1):
-                    backtrack(position + 1, mines_used + value)
-            assignment[index] = False
-
-        backtrack(0, 0)
-        if solution_count == 0:
-            return None
-        return {
-            cell: mine_solution_counts[cell_index[cell]] / solution_count
-            for cell in cells
+        assignment = [False] * len(ordered)
+        solutions_by_mines: dict[int, int] = defaultdict(int)
+        cell_mine_counts: dict[Coord, dict[int, int]] = {
+            cell: defaultdict(int) for cell in ordered
         }
 
-    def _probabilities(self) -> tuple[dict[Coord, float], set[Coord]]:
-        """Per-cell mine probabilities, plus which cells have exact values.
+        def backtrack(position: int, mines_used: int) -> None:
+            if position == len(ordered):
+                solutions_by_mines[mines_used] += 1
+                for i, cell in enumerate(ordered):
+                    if assignment[i]:
+                        cell_mine_counts[cell][mines_used] += 1
+                return
+            for is_mine in (False, True):
+                if is_mine and mines_used == mines_cap:
+                    continue
+                consistent = True
+                for constraint_index in touching[position]:
+                    undecided[constraint_index] -= 1
+                    assigned[constraint_index] += is_mine
+                    if (
+                        assigned[constraint_index] > required[constraint_index]
+                        or assigned[constraint_index] + undecided[constraint_index]
+                        < required[constraint_index]
+                    ):
+                        consistent = False
+                if consistent:
+                    assignment[position] = is_mine
+                    backtrack(position + 1, mines_used + is_mine)
+                    assignment[position] = False
+                for constraint_index in touching[position]:
+                    undecided[constraint_index] += 1
+                    assigned[constraint_index] -= is_mine
 
-        Cells in the exact set were fully enumerated: a probability of 0.0 or
-        1.0 there is a proof, not an estimate.
+        backtrack(0, 0)
+        if not solutions_by_mines:
+            return None
+        return dict(solutions_by_mines), cell_mine_counts
+
+    def _probabilities(
+        self,
+    ) -> tuple[dict[Coord, float], set[Coord], set[Coord]]:
+        """Mine probability for every hidden cell, plus proven-safe/mine sets.
+
+        When every frontier component is small enough to enumerate, the
+        probabilities are exact over ALL possibilities: each component's
+        layouts are combined with every other component's and weighted by how
+        many ways the leftover mines fit in the unexplored cells
+        (C(off_frontier, mines_left - used)). Certainties are detected with
+        integer arithmetic, so 0%/100% are proofs, not rounding.
         """
         constraints = self._constraints()
         hidden = set(self._hidden_cells())
         mines_left = self.field.mine_count - len(self._flagged_cells())
 
-        probabilities: dict[Coord, float] = {}
-        exact_cells: set[Coord] = set()
+        enumerated: list[
+            tuple[list[Coord], dict[int, int], dict[Coord, dict[int, int]]]
+        ] = []
+        heuristic: dict[Coord, float] = {}
         frontier: set[Coord] = set()
-        expected_frontier_mines = 0.0
 
         for cells, component_constraints in self._components(constraints):
             frontier.update(cells)
-            exact = self._enumerate_component(cells, component_constraints, mines_left)
-            if exact is not None:
-                probabilities.update(exact)
-                exact_cells.update(cells)
-                expected_frontier_mines += sum(exact.values())
+            result = self._enumerate_component(cells, component_constraints, mines_left)
+            if result is not None:
+                enumerated.append((cells, result[0], result[1]))
             else:
                 # Fallback: each cell gets the max density of its constraints.
                 for cell in cells:
-                    density = max(
+                    heuristic[cell] = max(
                         constraint.mines / len(constraint.cells)
                         for constraint in component_constraints
                         if cell in constraint.cells
                     )
-                    probabilities[cell] = density
-                    expected_frontier_mines += density
 
-        off_frontier = hidden - frontier
+        off_frontier = sorted(hidden - frontier)
+
+        if not heuristic:
+            exact = self._exact_probabilities(enumerated, off_frontier, mines_left)
+            if exact is not None:
+                return exact
+
+        # Some component was too big (or the weighting degenerated): fall back
+        # to per-component averages. Unanimous verdicts are still proofs.
+        probabilities: dict[Coord, float] = {}
+        certain_safe: set[Coord] = set()
+        certain_mine: set[Coord] = set()
+        expected_frontier_mines = 0.0
+
+        for cells, solutions_by_mines, cell_mine_counts in enumerated:
+            total = sum(solutions_by_mines.values())
+            for cell in cells:
+                mine_count = sum(cell_mine_counts[cell].values())
+                probabilities[cell] = mine_count / total
+                expected_frontier_mines += probabilities[cell]
+                if mine_count == 0:
+                    certain_safe.add(cell)
+                elif mine_count == total:
+                    certain_mine.add(cell)
+        for cell, density in heuristic.items():
+            probabilities[cell] = density
+            expected_frontier_mines += density
+
         if off_frontier:
             remaining = max(mines_left - expected_frontier_mines, 0.0)
             density = min(remaining / len(off_frontier), 1.0)
             for cell in off_frontier:
                 probabilities[cell] = density
 
-        return probabilities, exact_cells
+        return probabilities, certain_safe, certain_mine
 
-    def _enumeration_certainties(
-        self, probabilities: dict[Coord, float], exact_cells: set[Coord]
-    ) -> list[Move]:
-        """Turn proven 0%/100% enumeration results into certain moves."""
-        moves = []
-        for cell in sorted(exact_cells):
-            if probabilities[cell] == 1.0:
-                moves.append(Move("flag", cell, "proven mine (enumeration)"))
-            elif probabilities[cell] == 0.0:
-                moves.append(Move("reveal", cell, "proven safe (enumeration)"))
-        return moves
+    def _exact_probabilities(
+        self,
+        enumerated: list[tuple[list[Coord], dict[int, int], dict[Coord, dict[int, int]]]],
+        off_frontier: list[Coord],
+        mines_left: int,
+    ) -> tuple[dict[Coord, float], set[Coord], set[Coord]] | None:
+        """Joint probabilities over every component plus the unexplored cells."""
+        cells_off = len(off_frontier)
+
+        def off_placements(remaining: int) -> int:
+            if 0 <= remaining <= cells_off:
+                return math.comb(cells_off, remaining)
+            return 0
+
+        def convolve(polynomials: list[dict[int, int]]) -> dict[int, int]:
+            combined = {0: 1}
+            for polynomial in polynomials:
+                next_combined: dict[int, int] = defaultdict(int)
+                for a, count_a in combined.items():
+                    for b, count_b in polynomial.items():
+                        next_combined[a + b] += count_a * count_b
+                combined = dict(next_combined)
+            return combined
+
+        polynomials = [solutions for _, solutions, _ in enumerated]
+        combined_all = convolve(polynomials)
+        total_weight = sum(
+            count * off_placements(mines_left - used)
+            for used, count in combined_all.items()
+        )
+        if total_weight == 0:
+            return None
+
+        probabilities: dict[Coord, float] = {}
+        certain_safe: set[Coord] = set()
+        certain_mine: set[Coord] = set()
+
+        for index, (cells, solutions_by_mines, cell_mine_counts) in enumerate(enumerated):
+            others = convolve(
+                [polynomial for j, polynomial in enumerate(polynomials) if j != index]
+            )
+            # weight_by_mines[k]: global weight of one layout using k mines here.
+            weight_by_mines = {
+                k: sum(
+                    other_count * off_placements(mines_left - k - other_used)
+                    for other_used, other_count in others.items()
+                )
+                for k in solutions_by_mines
+            }
+            for cell in cells:
+                numerator = sum(
+                    count * weight_by_mines[k]
+                    for k, count in cell_mine_counts[cell].items()
+                )
+                probabilities[cell] = numerator / total_weight
+                if numerator == 0:
+                    certain_safe.add(cell)
+                elif numerator == total_weight:
+                    certain_mine.add(cell)
+
+        if off_frontier:
+            numerator = sum(
+                count * off_placements(mines_left - used) * (mines_left - used)
+                for used, count in combined_all.items()
+            )
+            probability = numerator / (total_weight * cells_off)
+            for cell in off_frontier:
+                probabilities[cell] = probability
+            if numerator == 0:
+                certain_safe.update(off_frontier)
+            elif numerator == total_weight * cells_off:
+                certain_mine.update(off_frontier)
+
+        return probabilities, certain_safe, certain_mine
 
     def _guess(self, probabilities: dict[Coord, float]) -> Move:
         """Pick the hidden cell with the lowest estimated mine probability."""
@@ -343,10 +449,17 @@ class AutoSweeper:
         if deduced:
             return deduced, False
 
-        # Cheap rules are exhausted; try full enumeration before guessing.
-        # Anything proven 0% or 100% is still a deduction, not a guess.
-        probabilities, exact_cells = self._probabilities()
-        certain = self._enumeration_certainties(probabilities, exact_cells)
+        # Cheap rules are exhausted; check every remaining possibility across
+        # the whole board before conceding a guess.
+        probabilities, certain_safe, certain_mine = self._probabilities()
+        certain = [
+            Move("flag", cell, "proven mine (enumeration)")
+            for cell in sorted(certain_mine)
+        ]
+        certain += [
+            Move("reveal", cell, "proven safe (enumeration)")
+            for cell in sorted(certain_safe)
+        ]
         if certain:
             return certain, False
         return [self._guess(probabilities)], True
@@ -385,6 +498,8 @@ class SolverViewer:
 
     HIGHLIGHT_REVEAL = "#fff176"
     HIGHLIGHT_FLAG = "#ffb74d"
+    HIT_MINE_COLOR = "#212121"
+    FLAGGED_MINE_COLOR = "#43a047"
 
     def __init__(
         self,
@@ -455,6 +570,8 @@ class SolverViewer:
         self.pending: deque[Move] = deque()
         self.move_count = 0
         self.guess_count = 0
+        self.hit_cell: Coord | None = None
+        self.flagged_mines: set[Coord] = set()
         self.paused = False
         self.pause_button.configure(text="Pause")
         self.status_text.set("Solving...")
@@ -499,6 +616,8 @@ class SolverViewer:
                 self.field.toggle_flag(row, column)
         else:
             self.field.reveal(row, column)
+            if self.field.game_over and not self.field.won:
+                self.hit_cell = move.cell
         self.move_count += 1
 
         self._refresh_all()
@@ -522,14 +641,17 @@ class SolverViewer:
                 f"Solved in {self.move_count} moves ({self.guess_count} guesses)!"
             )
         else:
-            # Show every mine so the losing guess is visible in context.
-            for row in self.field.cells:
-                for cell in row:
+            # Show every mine so the losing guess is visible in context,
+            # remembering which ones the solver had already flagged.
+            for row_index, row in enumerate(self.field.cells):
+                for column_index, cell in enumerate(row):
                     if cell.is_mine:
+                        if cell.state is CellState.FLAGGED:
+                            self.flagged_mines.add((row_index, column_index))
                         cell.state = CellState.REVEALED
             self._refresh_all()
             self.status_text.set(
-                f"Hit a mine after {self.move_count} moves "
+                f"Hit the black mine at {self.hit_cell} after {self.move_count} moves "
                 f"({self.guess_count} guesses). Click New Game to retry."
             )
 
@@ -553,7 +675,24 @@ class SolverViewer:
                         relief=tk.RAISED,
                     )
                 elif cell.is_mine:
-                    label.configure(text="✹", fg="white", bg="#d32f2f", relief=tk.SUNKEN)
+                    if (row, column) == self.hit_cell:
+                        label.configure(
+                            text="✹",
+                            fg="#ff5252",
+                            bg=self.HIT_MINE_COLOR,
+                            relief=tk.SUNKEN,
+                        )
+                    elif (row, column) in self.flagged_mines:
+                        label.configure(
+                            text="⚑",
+                            fg="white",
+                            bg=self.FLAGGED_MINE_COLOR,
+                            relief=tk.SUNKEN,
+                        )
+                    else:
+                        label.configure(
+                            text="✹", fg="white", bg="#d32f2f", relief=tk.SUNKEN
+                        )
                 else:
                     number = cell.adjacent_mines
                     label.configure(
