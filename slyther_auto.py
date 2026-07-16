@@ -4,8 +4,8 @@ import sys
 import time
 from collections import deque
 
-WIDTH = 10
-HEIGHT = 5
+WIDTH = 50
+HEIGHT = 20
 TICK_RATE = 0.11
 AUTO_PLAY = True
 SPEED_KEYS = {
@@ -16,10 +16,11 @@ SPEED_KEYS = {
     "k": 0,
 }
 MAX_SPEED_DRAW_INTERVAL = 128
-MAX_STRETCH_DETOURS = 32
-LATE_STRETCH_DETOURS = 48
-ENDGAME_STRETCH_DETOURS = 64
-SMALL_POCKET_LIMIT = 8
+
+# How much a shortcut is penalized per empty cell it jumps over. Skipped
+# empty cells become holes behind the head, and an apple spawning in a
+# hole costs a full trip around the board to reach.
+HOLE_PENALTY = 1
 
 DIRECTIONS = {
     "w": (0, -1),
@@ -331,112 +332,6 @@ def bfs_path(snake, goal, current_direction=None, blocked_extra=None):
     return path
 
 
-def detour_options(start, end):
-    if manhattan_distance(start, end) != 1:
-        return []
-
-    if start[0] == end[0]:
-        offsets = ((-1, 0), (1, 0))
-    else:
-        offsets = ((0, -1), (0, 1))
-
-    options = []
-
-    for offset in offsets:
-        first = add_positions(start, offset)
-        second = add_positions(end, offset)
-
-        if in_bounds(first) and in_bounds(second):
-            options.append((first, second))
-
-    return options
-
-
-def open_neighbor_count(position, blocked):
-    count = 0
-
-    for direction in DIRECTION_ORDER:
-        neighbor = add_positions(position, direction)
-
-        if in_bounds(neighbor) and neighbor not in blocked:
-            count += 1
-
-    return count
-
-
-def stretch_detour_limit(snake):
-    filled_ratio = len(snake) / (WIDTH * HEIGHT)
-
-    if filled_ratio >= 0.65:
-        return ENDGAME_STRETCH_DETOURS
-
-    if filled_ratio >= 0.35:
-        return LATE_STRETCH_DETOURS
-
-    return MAX_STRETCH_DETOURS
-
-
-def stretch_path(snake, path, blocked_extra=None, max_detours=MAX_STRETCH_DETOURS):
-    if not path:
-        return []
-
-    blocked = set(snake[:-1])
-
-    if blocked_extra:
-        blocked.update(blocked_extra)
-
-    full_path = [snake[0]] + path[:]
-    reserved = set(full_path)
-    detours_added = 0
-
-    while detours_added < max_detours:
-        changed = False
-        index = 0
-
-        while index < len(full_path) - 1 and detours_added < max_detours:
-            start = full_path[index]
-            end = full_path[index + 1]
-            best_detour = None
-            best_score = None
-
-            for first, second in detour_options(start, end):
-                if (
-                    first in blocked
-                    or second in blocked
-                    or first in reserved
-                    or second in reserved
-                ):
-                    continue
-
-                blocked_with_detour = blocked | reserved
-                open_cells = (
-                    open_neighbor_count(first, blocked_with_detour)
-                    + open_neighbor_count(second, blocked_with_detour)
-                )
-                pocket_bonus = 1 if open_cells <= 4 else 0
-                score = (pocket_bonus, -open_cells, first[1], first[0])
-
-                if best_score is None or score > best_score:
-                    best_score = score
-                    best_detour = (first, second)
-
-            if best_detour:
-                first, second = best_detour
-                full_path[index + 1:index + 1] = [first, second]
-                reserved.add(first)
-                reserved.add(second)
-                detours_added += 1
-                changed = True
-                index += 2
-
-            index += 1
-
-        if not changed:
-            break
-
-    return full_path[1:]
-
-
 def first_safe_direction(snake, path, food, current_direction):
     if not path:
         return None
@@ -494,49 +389,8 @@ def flood_fill_count(start, blocked):
     return len(visited)
 
 
-def open_space_stats(blocked):
-    visited = set()
-    region_count = 0
-    largest_region = 0
-    small_pocket_penalty = 0
-
-    for y in range(HEIGHT):
-        for x in range(WIDTH):
-            position = (x, y)
-
-            if position in blocked or position in visited:
-                continue
-
-            region_count += 1
-            queue = deque([position])
-            visited.add(position)
-            region_size = 0
-
-            while queue:
-                current = queue.popleft()
-                region_size += 1
-
-                for direction in DIRECTION_ORDER:
-                    neighbor = add_positions(current, direction)
-
-                    if (
-                        in_bounds(neighbor)
-                        and neighbor not in blocked
-                        and neighbor not in visited
-                    ):
-                        visited.add(neighbor)
-                        queue.append(neighbor)
-
-            largest_region = max(largest_region, region_size)
-
-            if region_size <= SMALL_POCKET_LIMIT:
-                small_pocket_penalty += SMALL_POCKET_LIMIT - region_size + 1
-
-    return small_pocket_penalty, largest_region, region_count
-
-
 def head_can_reach_tail(snake):
-    if len(snake) >= WIDTH * HEIGHT:
+    if len(snake) >= BOARD_SIZE:
         return True
 
     return bool(bfs_path(snake, snake[-1]))
@@ -557,15 +411,7 @@ def safest_open_direction(snake, food, current_direction):
         updated_snake = simulate_move(snake, new_head, food)
         blocked = set(updated_snake[:-1])
         reachable_cells = flood_fill_count(updated_snake[0], blocked)
-        tail_path = bfs_path(updated_snake, updated_snake[-1], direction)
-        tail_is_reachable = bool(tail_path)
-        long_tail_path = stretch_path(
-            updated_snake,
-            tail_path,
-            max_detours=stretch_detour_limit(updated_snake),
-        )
-        tail_room = len(long_tail_path)
-        small_pocket_penalty, largest_region, region_count = open_space_stats(blocked)
+        tail_is_reachable = head_can_reach_tail(updated_snake)
         food_distance = (
             manhattan_distance(new_head, food)
             if food is not None
@@ -573,12 +419,8 @@ def safest_open_direction(snake, food, current_direction):
         )
         score = (
             tail_is_reachable,
-            -small_pocket_penalty,
-            tail_room,
             reachable_cells,
-            largest_region,
-            -region_count,
-            food_distance,
+            -food_distance,
         )
 
         if best_score is None or score > best_score:
@@ -588,49 +430,82 @@ def safest_open_direction(snake, food, current_direction):
     return best_direction
 
 
-def choose_hamiltonian_direction(snake, food, current_direction):
+def empty_cells_skipped(snake_set, head, new_head):
+    """Count empty cells the move jumps over along the cycle.
+
+    Skipped empty cells end up behind the head, where the next apple can
+    spawn and force a wrap around the board. Skipping over body cells is
+    free: they hold no future apples.
+    """
+    start_index = CYCLE_INDEX[head]
+    jump = cycle_distance(head, new_head)
+    count = 0
+
+    for offset in range(1, jump):
+        cell = HAMILTONIAN_CYCLE[(start_index + offset) % BOARD_SIZE]
+
+        if cell not in snake_set:
+            count += 1
+
+    return count
+
+
+def choose_shortcut_direction(snake, food, current_direction):
+    """Follow the Hamiltonian cycle, taking safe shortcuts toward the
+    food while keeping the empty space consolidated ahead of the head.
+
+    Positions are ranked by their cycle index relative to the tail. As
+    long as every move lands strictly ahead of the head in that ranking,
+    the body stays ordered along the cycle, so falling back to plain
+    cycle-following can never collide. That makes shortcuts safe at any
+    fill level without lookahead.
+
+    Among safe moves the score trades apple distance against the holes a
+    jump leaves behind, so the next apple tends to spawn in the snake's
+    path instead of in a pocket that needs a full rotation to reach.
+    """
     if not snake_is_cycle_ordered(snake):
         return None
 
     head = snake[0]
     tail = snake[-1]
-    tail_distance = cycle_distance(head, tail)
+    snake_set = set(snake)
+    head_rank = cycle_distance(tail, head)
+    food_rank = cycle_distance(tail, food) if food is not None else None
+    food_is_ahead = food_rank is not None and food_rank > head_rank
+
     best_direction = None
     best_score = None
 
-    for direction in preferred_directions(current_direction):
-        if (
-            direction == (-current_direction[0], -current_direction[1])
-            or not can_move(snake, direction, food)
-        ):
+    for direction in DIRECTION_ORDER:
+        if direction == (-current_direction[0], -current_direction[1]):
+            continue
+
+        if not can_move(snake, direction, food):
             continue
 
         new_head = add_positions(head, direction)
-        jump_distance = cycle_distance(head, new_head)
+        new_rank = cycle_distance(tail, new_head)
 
-        if jump_distance == 0 or jump_distance >= tail_distance:
+        # Stepping into the tail cell is the furthest-forward move of
+        # all: the tail vacates it this tick (food is never on the body,
+        # so this move cannot grow).
+        if new_head == tail:
+            new_rank = BOARD_SIZE
+
+        if new_rank <= head_rank:
             continue
 
-        updated_snake = simulate_move(snake, new_head, food)
-        updated_tail_distance = cycle_distance(updated_snake[0], updated_snake[-1])
+        if food_is_ahead and new_rank > food_rank:
+            continue
+
         food_distance = (
-            cycle_distance(updated_snake[0], food)
-            if food is not None
-            else 0
+            cycle_distance(new_head, food) if food is not None else 0
         )
-        food_is_ahead = food is not None and food_distance < updated_tail_distance
-        cycle_step = 1 if new_head == cycle_successor(head) else 0
-        space_after_move = updated_tail_distance
+        holes_created = empty_cells_skipped(snake_set, head, new_head)
+        score = food_distance + HOLE_PENALTY * holes_created
 
-        score = (
-            food_is_ahead,
-            -food_distance if food_is_ahead else 0,
-            space_after_move,
-            cycle_step,
-            -jump_distance,
-        )
-
-        if best_score is None or score > best_score:
+        if best_score is None or score < best_score:
             best_score = score
             best_direction = direction
 
@@ -638,15 +513,18 @@ def choose_hamiltonian_direction(snake, food, current_direction):
 
 
 def choose_ai_direction(snake, food, current_direction):
-    hamiltonian_direction = choose_hamiltonian_direction(
+    shortcut_direction = choose_shortcut_direction(
         snake,
         food,
         current_direction,
     )
 
-    if hamiltonian_direction:
-        return hamiltonian_direction
+    if shortcut_direction:
+        return shortcut_direction
 
+    # Fallback for when manual play has scrambled the cycle ordering:
+    # chase the food if the tail stays reachable afterwards, otherwise
+    # follow the tail, otherwise keep as much open space as possible.
     food_path = bfs_path(snake, food, current_direction)
 
     if food_path:
@@ -657,33 +535,15 @@ def choose_ai_direction(snake, food, current_direction):
 
     blocked_food = {food} if food is not None else None
     tail_path = bfs_path(snake, snake[-1], current_direction, blocked_food)
+    tail_direction = first_safe_direction(
+        snake,
+        tail_path,
+        food,
+        current_direction,
+    )
 
-    if tail_path:
-        long_tail_path = stretch_path(
-            snake,
-            tail_path,
-            blocked_food,
-            max_detours=stretch_detour_limit(snake),
-        )
-        tail_direction = first_safe_direction(
-            snake,
-            long_tail_path,
-            food,
-            current_direction,
-        )
-
-        if tail_direction:
-            return tail_direction
-
-        tail_direction = first_safe_direction(
-            snake,
-            tail_path,
-            food,
-            current_direction,
-        )
-
-        if tail_direction:
-            return tail_direction
+    if tail_direction:
+        return tail_direction
 
     open_direction = safest_open_direction(snake, food, current_direction)
 

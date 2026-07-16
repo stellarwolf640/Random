@@ -3,10 +3,11 @@ import re
 import shutil
 import subprocess
 import time
+import os
 
 #N = 10_000_000_000
-#N = 10_000_000_000_000_000_000
-N = 100000000
+N = 10_000_000_000_000_000_000
+#N = 100000000
 
 DIVISOR_MAX_N = 10_000_000
 SIEVE_MAX_N = 500_000_000
@@ -275,6 +276,7 @@ def main():
 
 if __name__ == "__main__":
     try:
+        os.system('cls')
         main()
 
     except KeyboardInterrupt:

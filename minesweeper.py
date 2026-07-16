@@ -189,6 +189,7 @@ DIFFICULTIES = {
     "Beginner": (9, 9, 10),
     "Intermediate": (16, 16, 40),
     "Expert": (16, 30, 99),
+    "Impossible": (32, 64, 512)
 }
 
 
